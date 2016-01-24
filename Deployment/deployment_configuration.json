@@ -1,0 +1,5 @@
+{
+    "ElasticSearchHost": "localhost",
+    "ElasticSearchProtocol": "http",
+    "ElasticSearchCluster": "microservices"
+}
