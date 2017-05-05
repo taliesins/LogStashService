@@ -8,7 +8,7 @@ Gem::Specification.new do |s|
   s.required_rubygems_version = Gem::Requirement.new(">= 0") if s.respond_to? :required_rubygems_version=
   s.require_paths = ["lib"]
   s.authors = ["Rick Olson"]
-  s.date = "2015-10-06"
+  s.date = "2015-10-05"
   s.email = "technoweenie@gmail.com"
   s.homepage = "https://github.com/lostisland/faraday"
   s.licenses = ["MIT"]

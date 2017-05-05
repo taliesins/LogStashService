@@ -42,11 +42,14 @@ module Jars
     DEBUG = 'JARS_DEBUG'.freeze
     # vendor jars inside gem when installing gem
     VENDOR = 'JARS_VENDOR'.freeze
-    # resolve jars from Jars.lock
-    RESOLVE = 'JARS_RESOLVE'.freeze
   end
 
   class << self
+
+    def lock_down( debug = false, verbose = false, options = {} )
+      require 'jars/lock_down' # do this lazy to keep things clean
+      Jars::LockDown.new( debug, verbose ).lock_down( options )
+    end
 
     if defined? JRUBY_VERSION
       def to_prop( key )
@@ -86,7 +89,11 @@ module Jars
     def quiet?
       ( @silent ||= false ) || to_boolean( QUIET )
     end
-    
+
+    def jarfile
+      ENV[ 'JARFILE' ] || ENV_JAVA[ 'jarfile' ] || ENV[ 'JBUNDLER_JARFILE' ] || ENV_JAVA[ 'jbundler.jarfile' ] || 'Jarfile'
+    end
+
     # @deprecated
     def no_require?; ! require? end
 
@@ -102,10 +109,6 @@ module Jars
       to_boolean( VENDOR )
     end
 
-    def resolve?
-      to_boolean( RESOLVE )
-    end
-
     def no_more_warnings
       @silent = true
     end
@@ -118,11 +121,23 @@ module Jars
       to_prop( LOCK ) || 'Jars.lock'
     end
 
+    def jars_lock_from_class_loader
+      if to_prop( LOCK ).nil? && defined?(JRUBY_VERSION)
+        JRuby.runtime.jruby_class_loader.get_resources( 'Jars.lock' ).collect do |url|
+          url.to_s
+        end
+      end
+    end
+
     def lock_path( basedir = nil )
       deps = self.lock
       return deps if File.exists?( deps )
-      deps = File.join( basedir || '.', self.lock )
-      deps if File.exists?( deps )
+      basedir ||= '.'
+      [ '.', 'jars', 'vendor/jars' ].each do |dir|
+        file = File.join( basedir, dir, self.lock )
+        return file if File.exists?( file )
+      end
+      nil
     end
 
     def local_maven_repo
@@ -141,7 +156,7 @@ module Jars
       if ( @_jars_maven_user_settings_ ||= nil ).nil?
         if settings = absolute( to_prop( MAVEN_SETTINGS ) )
           unless File.exists?(settings)
-            warn "configured ENV['#{MAVEN_SETTINGS}'] = '#{settings}' not found"
+            Jars.warn { "configured ENV['#{MAVEN_SETTINGS}'] = '#{settings}' not found" }
             settings = false
           end
         else # use maven default (user) settings
@@ -170,15 +185,38 @@ module Jars
       @_jars_maven_global_settings_ || nil
     end
 
+    def local_maven_repo
+      @_local_maven_repo ||= detect_local_repository(maven_user_settings) ||
+                             detect_local_repository(maven_global_settings) ||
+                             File.join( user_home, '.m2', 'repository' )
+    end
+
     def home
-      @_jars_home_ ||= absolute(to_prop(HOME)) ||
-                       detect_local_repository(maven_user_settings) ||
-                       detect_local_repository(maven_global_settings) ||
-                       File.join( user_home, '.m2', 'repository' )
+      @_jars_home_ ||= absolute(to_prop(HOME)) || local_maven_repo
     end
 
     def require_jars_lock!( scope = :runtime )
-      if jars_lock = Jars.lock_path
+      urls = jars_lock_from_class_loader
+      if urls and urls.size > 0
+        @@jars_lock = true
+        # funny error during spec where it tries to load it again
+        # and finds it as gem instead of the LOAD_PATH
+        require 'jars/classpath' unless defined? Jars::Classpath
+        done = []
+        while done != urls do
+          urls.each do |url|
+            unless done.member?( url )
+              Jars.debug { "--- load jars from #{url}" }
+              classpath = Jars::Classpath.new( nil, "uri:#{url}" )
+              classpath.require( scope )
+              done << url
+            end
+          end
+          urls = jars_lock_from_class_loader
+        end
+        no_more_warnings
+      elsif jars_lock = Jars.lock_path
+        Jars.debug { "--- load jars from #{jars_lock}" }
         @@jars_lock = jars_lock
         # funny error during spec where it tries to load it again
         # and finds it as gem instead of the LOAD_PATH
@@ -186,6 +224,23 @@ module Jars
         classpath = Jars::Classpath.new( nil, jars_lock )
         classpath.require( scope )
         no_more_warnings
+      end
+      Jars.debug {
+        loaded = @@jars.collect{ |k,v| "#{k}:#{v}" }
+        "--- loaded jars ---\n\t#{loaded.join("\n\t")}"
+      }
+    end
+
+    def setup( options = nil )
+      case options
+      when Symbol
+        require_jars_lock!( options )
+      when Hash
+        @_jars_home = options[:jars_home]
+        @_jars_lock = options[:jars_lock]
+        require_jars_lock!( options[:scope] || :runtime )
+      else
+        require_jars_lock!
       end
     end
 
@@ -204,13 +259,17 @@ module Jars
 
     def require_jar( group_id, artifact_id, *classifier_version )
       require_jars_lock
-      require_jar_with_block( group_id, artifact_id, *classifier_version ) do |group_id, artifact_id, version, classifier|
-        do_require( group_id, artifact_id, version, classifier )
+      require_jar_with_block( group_id, artifact_id, *classifier_version ) do |gid, aid, version, classifier|
+        do_require( gid, aid, version, classifier )
       end
     end
 
-    def warn(msg)
-      Kernel.warn(msg) unless quiet?
+    def warn(msg = nil, &block)
+      Kernel.warn(msg || block.call) unless quiet? and not verbose?
+    end
+
+    def debug(msg = nil, &block)
+      Kernel.warn(msg || block.call) if verbose?
     end
 
     private
@@ -264,7 +323,7 @@ module Jars
       end
       local_repo
     rescue
-      warn "error reading or parsing #{settings}"
+      Jars.warn { "error reading or parsing #{settings}" }
       nil
     end
 
@@ -286,7 +345,7 @@ module Jars
         require jar
       end
     rescue LoadError => e
-      raise "\n\n\tyou might need to reinstall the gem which depends on the missing jar or in case there is Jars.lock then JARS_RESOLVE=true will install the missing jars\n\n" + e.message + " (LoadError)"
+      raise "\n\n\tyou might need to reinstall the gem which depends on the missing jar or in case there is Jars.lock then resolve the jars with `lock_jars` command\n\n" + e.message + " (LoadError)"
     end
 
   end # class << self
@@ -297,7 +356,8 @@ def require_jar( *args )
   return nil unless Jars.require?
   result = Jars.require_jar( *args )
   if result.is_a? String
-    Jars.warn "jar coordinate #{args[0..-2].join( ':' )} already loaded with version #{result}"
+    Jars.warn { "--- jar coordinate #{args[0..-2].join( ':' )} already loaded with version #{result} - omit version #{args[-1]}" }
+    Jars.debug { "    try to load from #{caller.join("\n\t")}" }
     return false
   end
   result

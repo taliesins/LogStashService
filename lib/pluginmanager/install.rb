@@ -1,5 +1,8 @@
 # encoding: utf-8
 require "pluginmanager/command"
+require "pluginmanager/install_strategy_factory"
+require "pluginmanager/ui"
+require "pluginmanager/errors"
 require "jar-dependencies"
 require "jar_install_post_install_hook"
 require "file-dependencies/gem"
@@ -9,13 +12,41 @@ class LogStash::PluginManager::Install < LogStash::PluginManager::Command
   parameter "[PLUGIN] ...", "plugin name(s) or file", :attribute_name => :plugins_arg
   option "--version", "VERSION", "version of the plugin to install"
   option "--[no-]verify", :flag, "verify plugin validity before installation", :default => true
+  option "--preserve", :flag, "preserve current gem options", :default => false
   option "--development", :flag, "install all development dependencies of currently installed plugins", :default => false
-  option "--local", :flag, "force local-only plugin installation. see bin/plugin package|unpack", :default => false
+  option "--local", :flag, "force local-only plugin installation. see bin/logstash-plugin package|unpack", :default => false
 
   # the install logic below support installing multiple plugins with each a version specification
   # but the argument parsing does not support it for now so currently if specifying --version only
   # one plugin name can be also specified.
   def execute
+    # Turn off any jar dependencies lookup when running with `--local`
+    ENV["JARS_SKIP"] = "true" if local?
+
+    # This is a special flow for PACK related plugins,
+    # if we dont detect an pack we will just use the normal `Bundle install` Strategy`
+    # this could be refactored into his own strategy
+    begin
+      if strategy = LogStash::PluginManager::InstallStrategyFactory.create(plugins_arg)
+        LogStash::PluginManager.ui.debug("Installing with strategy: #{strategy.class}")
+        strategy.execute
+        return
+      end
+    rescue LogStash::PluginManager::InstallError => e
+      report_exception("An error occured when installing the: #{plugins_args_human}, to have more information about the error add a DEBUG=1 before running the command.", e.original_exception)
+      return
+    rescue LogStash::PluginManager::FileNotFoundError => e
+      report_exception("File not found for: #{plugins_args_human}", e)
+      return
+    rescue LogStash::PluginManager::InvalidPackError => e
+      report_exception("Invalid pack for: #{plugins_args_human}, reason: #{e.message}", e)
+      return
+    rescue => e
+      report_exception("Something went wrong when installing #{plugins_args_human}", e)
+      return
+    end
+
+    # TODO(ph): refactor this into his own strategy
     validate_cli_options!
 
     if local_gems?
@@ -90,7 +121,15 @@ class LogStash::PluginManager::Install < LogStash::PluginManager::Command
 
     # Add plugins/gems to the current gemfile
     puts("Installing" + (install_list.empty? ? "..." : " " + install_list.collect(&:first).join(", ")))
-    install_list.each { |plugin, version, options| gemfile.update(plugin, version, options) }
+    install_list.each do |plugin, version, options|
+      if preserve?
+        plugin_gem = gemfile.find(plugin)
+        puts("Preserving Gemfile gem options for plugin #{plugin}") if plugin_gem && !plugin_gem.options.empty?
+        gemfile.update(plugin, version, options)
+      else
+        gemfile.overwrite(plugin, version, options)
+      end
+    end
 
     # Sync gemfiles changes to disk to make them available to the `bundler install`'s API
     gemfile.save
@@ -112,13 +151,14 @@ class LogStash::PluginManager::Install < LogStash::PluginManager::Command
 
   # Extract the specified local gems in a predefined local path
   # Update the gemfile to use a relative path to this plugin and run
-  # Bundler, this will mark the gem not updatable by `bin/plugin update`
+  # Bundler, this will mark the gem not updatable by `bin/logstash-plugin update`
   # This is the most reliable way to make it work in bundler without
   # hacking with `how bundler works`
   #
   # Bundler 2.0, will have support for plugins source we could create a .gem source
   # to support it.
   def extract_local_gems_plugins
+    FileUtils.mkdir_p(LogStash::Environment::CACHE_PATH)
     plugins_arg.collect do |plugin|
       # We do the verify before extracting the gem so we dont have to deal with unused path
       if verify?
@@ -126,6 +166,9 @@ class LogStash::PluginManager::Install < LogStash::PluginManager::Command
         signal_error("Installation aborted, verification failed for #{plugin}") unless LogStash::PluginManager.logstash_plugin?(plugin, version)
       end
 
+      # Make the original .gem available for the prepare-offline-pack,
+      # paquet will lookup in the cache directory before going to rubygems.
+      FileUtils.cp(plugin, ::File.join(LogStash::Environment::CACHE_PATH, ::File.basename(plugin)))
       package, path = LogStash::Rubygems.unpack(plugin, LogStash::Environment::LOCAL_GEM_PATH)
       [package.spec.name, package.spec.version, { :path => relative_path(path) }]
     end
@@ -142,5 +185,9 @@ class LogStash::PluginManager::Install < LogStash::PluginManager::Command
     else
       signal_usage_error("Mixed source of plugins, you can't mix local `.gem` and remote gems")
     end
+  end
+
+  def plugins_args_human
+    plugins_arg.join(", ")
   end
 end # class Logstash::PluginManager

@@ -1,1 +1,0 @@
-require "zabbix_protocol"

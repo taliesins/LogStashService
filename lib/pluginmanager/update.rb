@@ -6,22 +6,28 @@ require "file-dependencies/gem"
 
 class LogStash::PluginManager::Update < LogStash::PluginManager::Command
   REJECTED_OPTIONS = [:path, :git, :github]
+  # These are local gems used by LS and needs to be filtered out of other plugin gems
+  NON_PLUGIN_LOCAL_GEMS = ["logstash-core", "logstash-core-plugin-api"]
 
   parameter "[PLUGIN] ...", "Plugin name(s) to upgrade to latest version", :attribute_name => :plugins_arg
   option "--[no-]verify", :flag, "verify plugin validity before installation", :default => true
-  option "--local", :flag, "force local-only plugin update. see bin/plugin package|unpack", :default => false
+  option "--local", :flag, "force local-only plugin update. see bin/logstash-plugin package|unpack", :default => false
 
   def execute
-    local_gems = gemfile.locally_installed_gems
+    # Turn off any jar dependencies lookup when running with `--local`
+    ENV["JARS_SKIP"] = "true" if local?
+
+    # remove "system" local gems used by LS
+    local_gems = gemfile.locally_installed_gems.map(&:name) - NON_PLUGIN_LOCAL_GEMS
 
     if local_gems.size > 0
       if update_all?
-        plugins_with_path = local_gems.map(&:name)
+        plugins_with_path = local_gems
       else
-        plugins_with_path = plugins_arg & local_gems.map(&:name)
+        plugins_with_path = plugins_arg & local_gems
       end
 
-      warn_local_gems(plugins_with_path)
+      warn_local_gems(plugins_with_path) if plugins_with_path.size > 0
     end
     update_gems!
   end
@@ -40,14 +46,13 @@ class LogStash::PluginManager::Update < LogStash::PluginManager::Command
     previous_gem_specs_map = find_latest_gem_specs
 
     # remove any version constrain from the Gemfile so the plugin(s) can be updated to latest version
-    # calling update without requiremend will remove any previous requirements
+    # calling update without requirements will remove any previous requirements
     plugins = plugins_to_update(previous_gem_specs_map)
     # Skipping the major version validation when using a local cache as we can have situations
     # without internet connection.
     filtered_plugins = plugins.map { |plugin| gemfile.find(plugin) }
       .compact
       .reject { |plugin| REJECTED_OPTIONS.any? { |key| plugin.options.has_key?(key) } }
-      .select { |plugin| local? || (verify? ? validates_version(plugin.name) : true) }
       .each   { |plugin| gemfile.update(plugin.name) }
 
     # force a disk sync before running bundler
@@ -60,19 +65,15 @@ class LogStash::PluginManager::Update < LogStash::PluginManager::Command
     options = {:update => plugins, :rubygems_source => gemfile.gemset.sources}
     options[:local] = true if local?
     output = LogStash::Bundler.invoke!(options)
-    output = LogStash::Bundler.invoke!(:clean => true)
+    # We currently dont removed unused gems from the logstash installation
+    # see: https://github.com/elastic/logstash/issues/6339
+    # output = LogStash::Bundler.invoke!(:clean => true)
     display_updated_plugins(previous_gem_specs_map)
   rescue => exception
     gemfile.restore!
     report_exception("Updated Aborted", exception)
   ensure
     display_bundler_output(output)
-  end
-
-  # validate if there is any major version update so then we can ask the user if he is
-  # sure to update or not.
-  def validates_version(plugin)
-    LogStash::PluginManager.update_to_major_version?(plugin)
   end
 
   # create list of plugins to update

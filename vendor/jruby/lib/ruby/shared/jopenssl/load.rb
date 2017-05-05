@@ -8,12 +8,13 @@ unless ENV_JAVA['jruby.openssl.load.jars'].eql?('false')
   version = Jopenssl::Version::BOUNCY_CASTLE_VERSION
   bc_jars = nil
   begin
+    require 'jar-dependencies'
     # if we have jar-dependencies we let it track the jars
     require_jar( 'org.bouncycastle', 'bcpkix-jdk15on', version )
     require_jar( 'org.bouncycastle', 'bcprov-jdk15on', version )
     bc_jars = true
   rescue LoadError
-  end if defined?(Jars) && ( ! Jars.skip? ) rescue nil
+  end
   unless bc_jars
     load "org/bouncycastle/bcpkix-jdk15on/#{version}/bcpkix-jdk15on-#{version}.jar"
     load "org/bouncycastle/bcprov-jdk15on/#{version}/bcprov-jdk15on-#{version}.jar"
@@ -24,7 +25,9 @@ require 'jruby'
 require 'jopenssl.jar'
 org.jruby.ext.openssl.OpenSSL.load(JRuby.runtime)
 
-if RUBY_VERSION > '2.2'
+if RUBY_VERSION > '2.3'
+  load 'jopenssl23/openssl.rb'
+elsif RUBY_VERSION > '2.2'
   load 'jopenssl22/openssl.rb'
 elsif RUBY_VERSION > '2.1'
   load 'jopenssl21/openssl.rb'

@@ -31,7 +31,7 @@ module LogStash
       # This patch makes rubygems fetch directly from the remote servers
       # the dependencies he need and might not have downloaded in a local
       # repository. This basically enabled the offline feature to work as
-      # we remove the gems from the vendor directory before packacing.
+      # we remove the gems from the vendor directory before packaging.
       ::Bundler::Source::Rubygems.module_exec do
         def cached_gem(spec)
           cached_built_in_gem(spec)
@@ -78,7 +78,7 @@ module LogStash
     # @return [String, Exception] the installation captured output and any raised exception or nil if none
     def invoke!(options = {})
       options = {:max_tries => 10, :clean => false, :install => false, :update => false, :local => false,
-                 :all => false, :package => false, :without => [:development]}.merge(options)
+                 :jobs => 12, :all => false, :package => false, :without => [:development]}.merge(options)
       options[:without] = Array(options[:without])
       options[:update] = Array(options[:update]) if options[:update]
 
@@ -103,14 +103,24 @@ module LogStash
       ::Bundler.settings[:path] = LogStash::Environment::BUNDLE_DIR
       ::Bundler.settings[:gemfile] = LogStash::Environment::GEMFILE_PATH
       ::Bundler.settings[:without] = options[:without].join(":")
+      ::Bundler.settings[:force] = options[:force]
 
+      if !debug?
+        # Will deal with transient network errors
+        execute_bundler_with_retry(options)
+      else
+        options[:verbose] = true
+        execute_bundler(options)
+      end
+    end
+
+    def execute_bundler_with_retry(options)
       try = 0
       # capture_stdout also traps any raised exception and pass them back as the function return [output, exception]
       output, exception = capture_stdout do
         loop do
           begin
-            ::Bundler.reset!
-            ::Bundler::CLI.start(bundler_arguments(options))
+            execute_bundler(options)
             break
           rescue ::Bundler::VersionConflict => e
             $stderr.puts("Plugin version conflict, aborting")
@@ -132,10 +142,18 @@ module LogStash
           end
         end
       end
-
       raise exception if exception
 
       return output
+    end
+
+    def execute_bundler(options)
+      ::Bundler.reset!
+      ::Bundler::CLI.start(bundler_arguments(options))
+    end
+
+    def debug?
+      ENV["DEBUG"]
     end
 
     # build Bundler::CLI.start arguments array from the given options hash
@@ -161,6 +179,8 @@ module LogStash
         arguments << "package"
         arguments << "--all" if options[:all]
       end
+
+      arguments << "--verbose" if options[:verbose]
 
       arguments.flatten
     end

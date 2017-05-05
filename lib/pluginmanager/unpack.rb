@@ -8,13 +8,15 @@ class LogStash::PluginManager::Unpack < LogStash::PluginManager::PackCommand
   parameter "file", "the package file name", :attribute_name => :package_file, :required => true
 
   def execute
+    signal_deprecation_warning_for_pack
+
     puts("Unpacking #{package_file}")
 
     FileUtils.rm_rf(LogStash::Environment::CACHE_PATH)
     validate_cache_location
     archive_manager.extract(package_file, LogStash::Environment::CACHE_PATH)
     puts("Unpacked at #{LogStash::Environment::CACHE_PATH}")
-    puts("The unpacked plugins can now be installed in local-only mode using bin/plugin install --local [plugin name]")
+    puts("The unpacked plugins can now be installed in local-only mode using bin/logstash-plugin install --local [plugin name]")
   end
 
   private

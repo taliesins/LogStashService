@@ -50,27 +50,11 @@ module LogStash::PluginManager
   # @option options [Boolean] :pre Include pre release versions in the search (default: false)
   # @return [Hash] The plugin version information as returned by rubygems
   def self.fetch_latest_version_info(plugin, options={})
-    require "gems"
     exclude_prereleases =  options.fetch(:pre, false)
-    versions = Gems.versions(plugin)
+    versions = LogStash::Rubygems.versions(plugin)
     raise ValidationError.new("Something went wrong with the validation. You can skip the validation with the --no-verify option") if !versions.is_a?(Array) || versions.empty?
     versions = versions.select { |version| !version["prerelease"] } if !exclude_prereleases
     versions.first
-  end
-
-  # Let's you decide to update to the last version of a plugin if this is a major version
-  # @param [String] A plugin name
-  # @return [Boolean] True in case the update is moving forward, false otherwise
-  def self.update_to_major_version?(plugin_name)
-    plugin_version  = fetch_latest_version_info(plugin_name)
-    latest_version  = plugin_version['number'].split(".")
-    current_version = Gem::Specification.find_by_name(plugin_name).version.version.split(".")
-    if (latest_version[0].to_i > current_version[0].to_i)
-      ## warn if users want to continue
-      puts("You are updating #{plugin_name} to a new version #{latest_version.join('.')}, which may not be compatible with #{current_version.join('.')}. are you sure you want to proceed (Y/N)?")
-      return ( "y" == STDIN.gets.strip.downcase ? true : false)
-    end
-    true
   end
 
   # @param spec [Gem::Specification] plugin gem specification
@@ -93,7 +77,7 @@ module LogStash::PluginManager
   end
 
   # retrieve gem specs for all or specified name valid logstash plugins locally installed
-  # @param name [String] specific plugin name to find or nil for all plungins
+  # @param name [String] specific plugin name to find or nil for all plugins
   # @return [Array<Gem::Specification>] all local logstash plugin gem specs
   def self.find_plugins_gem_specs(name = nil)
     specs = name ? Gem::Specification.find_all_by_name(name) : Gem::Specification.find_all
@@ -101,7 +85,7 @@ module LogStash::PluginManager
   end
 
   # list of all locally installed plugins specs specified in the Gemfile.
-  # note that an installed plugin dependecies like codecs will not be listed, only those
+  # note that an installed plugin dependencies like codecs will not be listed, only those
   # specifically listed in the Gemfile.
   # @param gemfile [LogStash::Gemfile] the gemfile to validate against
   # @return [Array<Gem::Specification>] list of plugin specs
@@ -113,13 +97,13 @@ module LogStash::PluginManager
 
   # @param plugin [String] plugin name
   # @param gemfile [LogStash::Gemfile] the gemfile to validate against
-  # @return [Boolean] true if the plugin is an installed logstash plugin and spefificed in the Gemfile
+  # @return [Boolean] true if the plugin is an installed logstash plugin and specified in the Gemfile
   def self.installed_plugin?(plugin, gemfile)
     !!gemfile.find(plugin) && find_plugins_gem_specs(plugin).any?
   end
 
   # @param plugin_list [Array] array of [plugin name, version] tuples
-  # @return [Array] array of [plugin name, version, ...] tuples when duplciate names have been merged and non duplicate version requirements added
+  # @return [Array] array of [plugin name, version, ...] tuples when duplicate names have been merged and non duplicate version requirements added
   def self.merge_duplicates(plugin_list)
 
     # quick & dirty naive dedup for now
